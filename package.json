@@ -2,6 +2,23 @@
   "name": "codex-im-sync-skill",
   "version": "0.1.0",
   "description": "Bridge IM platforms to local Codex sessions with resumable thread sync",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Bingee/codex-im-sync.git"
+  },
+  "homepage": "https://github.com/Bingee/codex-im-sync#readme",
+  "bugs": {
+    "url": "https://github.com/Bingee/codex-im-sync/issues"
+  },
+  "keywords": [
+    "codex",
+    "feishu",
+    "telegram",
+    "discord",
+    "chatops",
+    "skill"
+  ],
   "type": "module",
   "scripts": {
     "build": "node scripts/build.js",

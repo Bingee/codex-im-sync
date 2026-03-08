@@ -153,7 +153,7 @@ bash ~/code/codex-im-sync/scripts/install-codex.sh --link
    如果你后续要接 Feishu 模板卡片交互，再额外添加回调 `card.action.trigger`
 6. **发布**：进入"版本管理与发布" → 创建版本 → 提交审核 → 在管理后台审核通过
 7. **注意**：版本审核通过并发布后机器人才能使用
-8. **机器人菜单**：在机器人能力里配置事件型菜单，建议使用这些 key：
+8. **机器人菜单**：为了更稳，建议把菜单配置成**发送文字消息**，消息内容使用：
    `cti_threads`、`cti_threads_refresh`、`cti_new_session`、`cti_status`
    如果你想一键切最近线程，再加：
    `cti_use_1`、`cti_use_2`、`cti_use_3`、`cti_use_4`、`cti_use_5`
@@ -167,6 +167,7 @@ bash ~/code/codex-im-sync/scripts/install-codex.sh --link
 说明：
 - `/threads` 会给最近线程编号，你可以直接发 `/use 1`
 - 飞书菜单里的 `cti_use_1` 到 `cti_use_5` 会映射到 `/use 1` 到 `/use 5`
+- 对本地长连接 bridge 来说，飞书“发送文字消息”菜单通常比回调事件菜单更稳定
 - 飞书 `schema 2.0` 原生卡片不支持旧版 `action` 按钮标签，所以线程切换不依赖卡片按钮回调
 
 ## 架构
@@ -239,6 +240,13 @@ bash ~/code/codex-im-sync/scripts/install-codex.sh --link
 - 允许用户/频道/服务器列表限制谁可以与机器人交互
 - 守护进程是本地进程，没有入站网络监听
 - 详见 [SECURITY.md](SECURITY.md) 了解威胁模型和应急响应
+
+## 适用范围与限制
+
+- 这个 fork 更适合单用户或强受控的个人环境，不是多租户托管方案
+- Codex 线程同步依赖本机 `~/.codex/sessions` 下的本地会话文件
+- 飞书线程切换当前依赖编号命令或“发送文字消息”菜单，不依赖原生卡片动作回调
+- `npm run typecheck` 仍可能被上游 `claude-to-im` 的 ESM 类型问题卡住；对这个 fork 更可靠的验证方式是 `npm test` 和 `npm run build`
 
 ## 开发
 

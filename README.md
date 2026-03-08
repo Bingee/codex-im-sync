@@ -154,7 +154,7 @@ The `setup` wizard provides inline guidance for every step. Here's a summary:
    Add callback `card.action.trigger` only if you later use Feishu template-card interactions.
 6. **Publish**: go to "Version Management & Release" → create version → submit for review → approve in Admin Console
 7. **Important**: The bot will NOT work until the version is approved and published
-8. **Bot menu**: configure event-type menu items with these keys:
+8. **Bot menu**: for the most reliable setup, configure menu items to **send text messages** instead of callback events. Use:
    `cti_threads`, `cti_threads_refresh`, `cti_new_session`, `cti_status`
    For one-tap recent-thread switching, also add:
    `cti_use_1`, `cti_use_2`, `cti_use_3`, `cti_use_4`, `cti_use_5`
@@ -168,6 +168,7 @@ The `setup` wizard provides inline guidance for every step. Here's a summary:
 Notes:
 - `/threads` numbers the recent thread list, so `/use 1` is usually enough
 - Feishu menu keys `cti_use_1` through `cti_use_5` map to `/use 1` through `/use 5`
+- In practice, Feishu text-sending menus are more reliable for local long-connection deployments than callback-event menus
 - Feishu `schema 2.0` raw cards no longer support the legacy `action` tag, so thread switching does not rely on card buttons
 
 ## Architecture
@@ -240,6 +241,13 @@ See [references/troubleshooting.md](references/troubleshooting.md) for more deta
 - Allowed user/channel/guild lists restrict who can interact with the bot
 - The daemon is a local process with no inbound network listeners
 - See [SECURITY.md](SECURITY.md) for threat model and incident response
+
+## Scope and Limits
+
+- This fork is designed for single-user or tightly controlled personal setups, not multi-tenant hosting
+- Codex thread sync depends on local Codex session files under `~/.codex/sessions`
+- Feishu thread switching currently relies on numbered commands or text-sending bot menus, not raw card action callbacks
+- `npm run typecheck` may still fail because of upstream `claude-to-im` ESM typing issues; `npm test` and `npm run build` are the more reliable validation steps for this fork
 
 ## Development
 
