@@ -2,20 +2,21 @@
 
 ## Bridge won't start
 
-**Symptoms**: `/claude-to-im start` fails or daemon exits immediately.
+**Symptoms**: `/codex-im-sync start` fails or daemon exits immediately.
 
 **Steps**:
 
-1. Run `/claude-to-im doctor` to identify the issue
+1. Run `/codex-im-sync doctor` to identify the issue
 2. Check that Node.js >= 20 is installed: `node --version`
-3. Check that Claude Code CLI is available: `claude --version`
-4. Verify config exists: `ls -la ~/.claude-to-im/config.env`
-5. Check logs for startup errors: `/claude-to-im logs`
+3. Check that Codex CLI is available: `codex --version`
+4. Verify config exists: `ls -la ~/.codex-im-sync/config.env`
+5. Check logs for startup errors: `/codex-im-sync logs`
 
 **Common causes**:
-- Missing or invalid config.env -- run `/claude-to-im setup`
+- Missing or invalid config.env -- run `/codex-im-sync setup`
 - Node.js not found or wrong version -- install Node.js >= 20
-- Port or resource conflict -- check if another instance is running with `/claude-to-im status`
+- Codex CLI not found or not logged in -- run `codex --version` and `codex auth login`
+- Another instance is already running -- check with `/codex-im-sync status`
 
 ## Messages not received
 
@@ -23,22 +24,39 @@
 
 **Steps**:
 
-1. Verify the bot token is valid: `/claude-to-im doctor`
+1. Verify the bot token is valid: `/codex-im-sync doctor`
 2. Check allowed user IDs in config -- if set, only listed users can interact
 3. For Telegram: ensure you've sent `/start` to the bot first
 4. For Discord: verify the bot has been invited to the server with message read permissions
 5. For Feishu: confirm the app has been approved and event subscriptions are configured
-6. Check logs for incoming message events: `/claude-to-im logs 200`
+6. Check logs for incoming message events: `/codex-im-sync logs 200`
 
-## Permission timeout
+## Feishu thread switch card cannot be clicked
 
-**Symptoms**: Claude Code session starts but times out waiting for tool approval.
+**Symptoms**: A Feishu thread card shows content, but button-style switching fails or the platform returns an error such as `230099` or `200340`.
+
+**Cause**:
+
+- Feishu `schema 2.0` raw cards no longer support the legacy `action` tag
+- `codex-im-sync` therefore uses menu shortcuts plus `/use <index|thread_id|project_name>` for thread switching
 
 **Steps**:
 
-1. The bridge runs Claude Code in non-interactive mode; ensure your Claude Code configuration allows the necessary tools
-2. Consider using `--allowedTools` in your configuration to pre-approve common tools
-3. Check network connectivity if the timeout occurs during API calls
+1. Use `/threads` to view the latest numbered thread list
+2. Switch with `/use 1` or `/use babynight`
+3. Configure bot menu keys `cti_use_1` through `cti_use_5` for one-tap recent-thread switching
+4. Keep `card.action.trigger` only for Feishu template-card integrations; it is not required for the built-in thread list
+
+## Permission timeout
+
+**Symptoms**: The IM bridge starts a Codex turn, but approval or execution never completes.
+
+**Steps**:
+
+1. Check your Codex execution policy in `~/.codex-im-sync/config.env`
+2. If you want unattended runs, set `CTI_CODEX_APPROVAL_POLICY=never` or `CTI_CODEX_FULL_AUTO=true`
+3. For very high-trust local setups only, consider `CTI_CODEX_DANGEROUS_BYPASS=true`
+4. Check logs if the timeout happens during platform API calls or Codex auth
 
 ## High memory usage
 
@@ -46,14 +64,25 @@
 
 **Steps**:
 
-1. Check current memory usage: `/claude-to-im status`
+1. Check current memory usage: `/codex-im-sync status`
 2. Restart the daemon to reset memory:
    ```
-   /claude-to-im stop
-   /claude-to-im start
+   /codex-im-sync stop
+   /codex-im-sync start
    ```
-3. If the issue persists, check how many concurrent sessions are active -- each Claude Code session consumes memory
+3. If the issue persists, check how many concurrent Codex sessions are active
 4. Review logs for error loops that may cause memory leaks
+
+## Session not syncing as expected
+
+**Symptoms**: The IM chat continues, but you do not see the same thread in your local Codex workflow.
+
+**Steps**:
+
+1. Confirm the bridge is running with `CTI_RUNTIME=codex`
+2. Check logs for a resumed session ID in `/codex-im-sync logs 200`
+3. Avoid switching that IM chat to a different project directory unless you intend to fork context
+4. Verify you are continuing the same local Codex session, not opening a fresh one manually
 
 ## Stale PID file
 
@@ -61,9 +90,9 @@
 
 The daemon management script (`daemon.sh`) handles stale PID files automatically. If you still encounter issues:
 
-1. Run `/claude-to-im stop` -- it will clean up the stale PID file
+1. Run `/codex-im-sync stop` -- it will clean up the stale PID file
 2. If stop also fails, manually remove the PID file:
    ```bash
-   rm ~/.claude-to-im/runtime/bridge.pid
+   rm ~/.codex-im-sync/runtime/bridge.pid
    ```
-3. Run `/claude-to-im start` to launch a fresh instance
+3. Run `/codex-im-sync start` to launch a fresh instance

@@ -1,24 +1,13 @@
-/**
- * Codex Provider — LLMProvider implementation backed by @openai/codex-sdk.
- *
- * Maps Codex SDK thread events to the SSE stream format consumed by
- * the bridge conversation engine, making Codex a drop-in alternative
- * to the Claude Code SDK backend.
- *
- * Requires `@openai/codex-sdk` to be installed (optionalDependency).
- * The provider lazily imports the SDK at first use and throws a clear
- * error if it is not available.
- */
-
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execSync, spawn } from 'node:child_process';
 
 import type { LLMProvider, StreamChatParams } from 'claude-to-im/src/lib/bridge/host.js';
 import type { PendingPermissions } from './permission-gateway.js';
+import { buildSubprocessEnv } from './llm-provider.js';
 import { sseEvent } from './sse-utils.js';
 
-/** MIME → file extension for temp image files. */
 const MIME_EXT: Record<string, string> = {
   'image/png': '.png',
   'image/jpeg': '.jpg',
@@ -27,253 +16,456 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// All SDK types kept as `any` because @openai/codex-sdk is optional.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexModule = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type CodexInstance = any;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type ThreadInstance = any;
+export interface CodexCliOptions {
+  codexPath?: string;
+  sandboxMode?: string;
+  approvalPolicy?: string;
+  fullAuto?: boolean;
+  dangerouslyBypass?: boolean;
+  spawnImpl?: typeof spawn;
+}
 
-/**
- * Map bridge permission modes to Codex approval policies.
- * - 'acceptEdits' (code mode) → 'on-failure' (auto-approve most things)
- * - 'plan' → 'on-request' (ask before executing)
- * - 'default' (ask mode) → 'on-request'
- */
-function toApprovalPolicy(permissionMode?: string): string {
-  switch (permissionMode) {
-    case 'acceptEdits': return 'on-failure';
-    case 'plan': return 'on-request';
-    case 'default': return 'on-request';
-    default: return 'on-request';
+function isExecutable(filePath: string): boolean {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-/** Whether to forward bridge model to Codex CLI. Default: false (use Codex current/default model). */
-function shouldPassModelToCodex(): boolean {
-  return process.env.CTI_CODEX_PASS_MODEL === 'true';
+function resolveCodexCliPath(explicitPath?: string): string | undefined {
+  if (explicitPath && isExecutable(explicitPath)) {
+    return explicitPath;
+  }
+
+  const fromEnv = process.env.CTI_CODEX_EXECUTABLE || process.env.CTI_CODEX_BIN;
+  if (fromEnv && isExecutable(fromEnv)) {
+    return fromEnv;
+  }
+
+  const isWindows = process.platform === 'win32';
+  const cmd = isWindows ? 'where codex' : 'which codex';
+  try {
+    const resolved = execSync(cmd, { encoding: 'utf-8', timeout: 3000 }).trim().split('\n')[0];
+    if (resolved && isExecutable(resolved)) {
+      return resolved;
+    }
+  } catch {
+    // Ignore PATH lookup failures.
+  }
+
+  const candidates = isWindows
+    ? [
+        process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Programs\\codex\\codex.exe` : '',
+        'C:\\Program Files\\codex\\codex.exe',
+      ].filter(Boolean)
+    : [
+        '/usr/local/bin/codex',
+        '/opt/homebrew/bin/codex',
+        `${process.env.HOME}/.npm-global/bin/codex`,
+        `${process.env.HOME}/.local/bin/codex`,
+      ];
+
+  for (const candidate of candidates) {
+    if (candidate && isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
-function looksLikeClaudeModel(model?: string): boolean {
-  return !!model && /^claude[-_]/i.test(model);
+function toTomlString(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
-function shouldRetryFreshThread(message: string): boolean {
-  const lower = message.toLowerCase();
-  return (
-    lower.includes('resuming session with different model') ||
-    lower.includes('no such session') ||
-    (lower.includes('resume') && lower.includes('session'))
-  );
+function extractTextFragment(node: unknown): string {
+  if (node == null) {
+    return '';
+  }
+  if (typeof node === 'string') {
+    return node;
+  }
+  if (Array.isArray(node)) {
+    return node.map(extractTextFragment).join('');
+  }
+  if (typeof node === 'object') {
+    for (const key of ['text', 'delta', 'text_delta', 'content', 'message', 'output_text']) {
+      if (key in node) {
+        const value = extractTextFragment((node as Record<string, unknown>)[key]);
+        if (value) {
+          return value;
+        }
+      }
+    }
+    return Object.values(node as Record<string, unknown>).map(extractTextFragment).join('');
+  }
+  return '';
 }
 
-export class CodexProvider implements LLMProvider {
-  private sdk: CodexModule | null = null;
-  private codex: CodexInstance | null = null;
+function composeAgentText(messages: string[], currentAgentText: string): string {
+  const parts = messages
+    .map(message => message.trim())
+    .filter(Boolean);
 
-  /** Maps session IDs to Codex thread IDs for resume. */
-  private threadIds = new Map<string, string>();
+  if (currentAgentText.trim()) {
+    parts.push(currentAgentText.trim());
+  }
 
-  constructor(private pendingPerms: PendingPermissions) {}
+  return parts.join('\n\n').trim();
+}
 
-  /**
-   * Lazily load the Codex SDK. Throws a clear error if not installed.
-   */
-  private async ensureSDK(): Promise<{ sdk: CodexModule; codex: CodexInstance }> {
-    if (this.sdk && this.codex) {
-      return { sdk: this.sdk, codex: this.codex };
+function consumeExecEvent(
+  evt: Record<string, unknown>,
+  messages: string[],
+  currentAgentText: string,
+): { threadId?: string; messages: string[]; currentAgentText: string; changed: boolean } {
+  let threadId: string | undefined;
+  let changed = false;
+
+  const eventType = String(evt.type || '').trim().toLowerCase();
+  if (eventType === 'thread.started') {
+    threadId = String(evt.thread_id || '').trim() || undefined;
+    if (!threadId && typeof evt.thread === 'object' && evt.thread) {
+      threadId = String((evt.thread as Record<string, unknown>).id || '').trim() || undefined;
+    }
+  }
+
+  const item = typeof evt.item === 'object' && evt.item ? evt.item as Record<string, unknown> : {};
+  const itemType = String(item.type || '').trim().toLowerCase();
+  const isAgentItem = itemType === 'agent_message' || itemType === 'assistant_message';
+
+  if (['item.delta', 'response.output_text.delta', 'assistant_message.delta', 'message.delta'].includes(eventType)) {
+    const delta = (
+      extractTextFragment(evt.delta)
+      || extractTextFragment(evt.text_delta)
+      || extractTextFragment(evt.text)
+      || extractTextFragment(item.delta)
+      || extractTextFragment(item.text_delta)
+    );
+
+    if (delta) {
+      if (!currentAgentText) {
+        currentAgentText = delta;
+      } else if (delta.startsWith(currentAgentText)) {
+        currentAgentText = delta;
+      } else if (!currentAgentText.endsWith(delta)) {
+        currentAgentText += delta;
+      }
+      changed = true;
+    }
+  }
+
+  if ((eventType === 'item.updated' || eventType === 'item.completed') && isAgentItem) {
+    const fullText = (
+      extractTextFragment(item.text)
+      || extractTextFragment(item.content)
+      || extractTextFragment(item.message)
+    ).trim();
+
+    if (fullText) {
+      currentAgentText = fullText;
+      changed = true;
+    }
+
+    if (eventType === 'item.completed' && currentAgentText.trim()) {
+      const finalized = currentAgentText.trim();
+      if (!messages.length || messages[messages.length - 1] !== finalized) {
+        messages.push(finalized);
+        changed = true;
+      }
+      currentAgentText = '';
+    }
+  }
+
+  if (['turn.completed', 'response.completed', 'thread.completed'].includes(eventType)) {
+    const fallbackText = (
+      extractTextFragment(evt.output_text)
+      || extractTextFragment(evt.text)
+    ).trim();
+
+    if (fallbackText && (!messages.length || messages[messages.length - 1] !== fallbackText)) {
+      messages.push(fallbackText);
+      changed = true;
+    }
+
+    if (currentAgentText.trim()) {
+      const finalized = currentAgentText.trim();
+      if (!messages.length || messages[messages.length - 1] !== finalized) {
+        messages.push(finalized);
+        changed = true;
+      }
+      currentAgentText = '';
+    }
+  }
+
+  return { threadId, messages, currentAgentText, changed };
+}
+
+function parseExecJson(stdout: string): { threadId?: string; text: string } {
+  let threadId: string | undefined;
+  let messages: string[] = [];
+  let currentAgentText = '';
+
+  for (const rawLine of stdout.split('\n')) {
+    const line = rawLine.trim();
+    if (!line.startsWith('{')) {
+      continue;
     }
 
     try {
-      this.sdk = await (Function('return import("@openai/codex-sdk")')() as Promise<CodexModule>);
+      const evt = JSON.parse(line) as Record<string, unknown>;
+      const consumed = consumeExecEvent(evt, messages, currentAgentText);
+      if (consumed.threadId && !threadId) {
+        threadId = consumed.threadId;
+      }
+      messages = consumed.messages;
+      currentAgentText = consumed.currentAgentText;
     } catch {
+      // Ignore malformed JSONL rows.
+    }
+  }
+
+  return { threadId, text: composeAgentText(messages, currentAgentText) };
+}
+
+export class CodexProvider implements LLMProvider {
+  private codexPath: string;
+  private sandboxMode?: string;
+  private approvalPolicy?: string;
+  private fullAuto: boolean;
+  private dangerouslyBypass: boolean;
+  private spawnImpl: typeof spawn;
+
+  constructor(_pendingPerms: PendingPermissions, options: CodexCliOptions = {}) {
+    const codexPath = resolveCodexCliPath(options.codexPath);
+    if (!codexPath) {
       throw new Error(
-        '[CodexProvider] @openai/codex-sdk is not installed. ' +
-        'Install it with: npm install @openai/codex-sdk'
+        'Cannot find the `codex` CLI executable. Set CTI_CODEX_EXECUTABLE=/path/to/codex or install Codex CLI.',
       );
     }
 
-    // Resolve API key: CTI_CODEX_API_KEY > CODEX_API_KEY > OPENAI_API_KEY > (login auth)
-    const apiKey = process.env.CTI_CODEX_API_KEY
-      || process.env.CODEX_API_KEY
-      || process.env.OPENAI_API_KEY
-      || undefined;
-    const baseUrl = process.env.CTI_CODEX_BASE_URL || undefined;
-
-    const CodexClass = this.sdk.Codex;
-    this.codex = new CodexClass({
-      ...(apiKey ? { apiKey } : {}),
-      ...(baseUrl ? { baseUrl } : {}),
-    });
-
-    return { sdk: this.sdk, codex: this.codex };
+    this.codexPath = codexPath;
+    this.sandboxMode = options.sandboxMode;
+    this.approvalPolicy = options.approvalPolicy;
+    this.fullAuto = options.fullAuto ?? false;
+    this.dangerouslyBypass = options.dangerouslyBypass ?? false;
+    this.spawnImpl = options.spawnImpl ?? spawn;
   }
 
   streamChat(params: StreamChatParams): ReadableStream<string> {
-    const self = this;
+    const codexPath = this.codexPath;
+    const sandboxMode = this.sandboxMode;
+    const approvalPolicy = this.approvalPolicy;
+    const fullAuto = this.fullAuto;
+    const dangerouslyBypass = this.dangerouslyBypass;
+    const spawnImpl = this.spawnImpl;
+    const provider = this;
 
     return new ReadableStream<string>({
       start(controller) {
+        const tempFiles: string[] = [];
+        let proc: ReturnType<typeof spawn> | undefined;
+
+        const cleanup = () => {
+          for (const tempFile of tempFiles) {
+            try {
+              fs.unlinkSync(tempFile);
+            } catch {
+              // Ignore cleanup failures.
+            }
+          }
+        };
+
+        const onAbort = () => {
+          proc?.kill('SIGTERM');
+        };
+
+        params.abortController?.signal.addEventListener('abort', onAbort, { once: true });
+
         (async () => {
-          const tempFiles: string[] = [];
           try {
-            const { codex } = await self.ensureSDK();
-
-            // Resolve or create thread
-            let savedThreadId = params.sdkSessionId
-              ? self.threadIds.get(params.sessionId) || params.sdkSessionId
-              : undefined;
-
-            // Cross-runtime migration safety:
-            // when a persisted Claude-model session leaks into Codex runtime,
-            // resuming it can fail immediately with model/session mismatch.
-            if (savedThreadId && looksLikeClaudeModel(params.model)) {
-              console.warn('[codex-provider] Ignoring stale Claude-like sdkSessionId in Codex runtime; starting fresh thread');
-              savedThreadId = undefined;
+            const configFlags: string[] = [];
+            if (sandboxMode) {
+              configFlags.push('-c', `sandbox_mode=${toTomlString(sandboxMode)}`);
+            }
+            if (approvalPolicy) {
+              configFlags.push('-c', `approval_policy=${toTomlString(approvalPolicy)}`);
             }
 
-            const approvalPolicy = toApprovalPolicy(params.permissionMode);
-            const passModel = shouldPassModelToCodex();
-
-            const threadOptions: Record<string, unknown> = {
-              ...(passModel && params.model ? { model: params.model } : {}),
-              ...(params.workingDirectory ? { workingDirectory: params.workingDirectory } : {}),
-              approvalPolicy,
-            };
-
-            // Build input: Codex SDK UserInput supports { type: "text" } and
-            // { type: "local_image", path: string }. We write base64 data to
-            // temp files so the SDK can read them as local images.
-            const imageFiles = params.files?.filter(
-              f => f.type.startsWith('image/')
-            ) ?? [];
-
-            let input: string | Array<Record<string, string>>;
-            if (imageFiles.length > 0) {
-              const parts: Array<Record<string, string>> = [
-                { type: 'text', text: params.prompt },
-              ];
-              for (const file of imageFiles) {
-                const ext = MIME_EXT[file.type] || '.png';
-                const tmpPath = path.join(os.tmpdir(), `cti-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
-                fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));
-                tempFiles.push(tmpPath);
-                parts.push({ type: 'local_image', path: tmpPath });
-              }
-              input = parts;
-            } else {
-              input = params.prompt;
+            const execFlags: string[] = ['--json', '--skip-git-repo-check'];
+            if (fullAuto) {
+              execFlags.push('--full-auto');
+            }
+            if (dangerouslyBypass) {
+              execFlags.push('--dangerously-bypass-approvals-and-sandbox');
+            }
+            if (params.model) {
+              execFlags.push('-m', params.model);
             }
 
-            let retryFresh = false;
+            const imageFiles = params.files?.filter(file => file.type.startsWith('image/')) ?? [];
+            for (const file of imageFiles) {
+              const ext = MIME_EXT[file.type] || '.png';
+              const tmpPath = path.join(
+                os.tmpdir(),
+                `cti-codex-img-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`,
+              );
+              fs.writeFileSync(tmpPath, Buffer.from(file.data, 'base64'));
+              tempFiles.push(tmpPath);
+              execFlags.push('-i', tmpPath);
+            }
 
-            while (true) {
-              let thread: ThreadInstance;
-              if (savedThreadId) {
-                try {
-                  thread = codex.resumeThread(savedThreadId, threadOptions);
-                } catch {
-                  thread = codex.startThread(threadOptions);
-                }
-              } else {
-                thread = codex.startThread(threadOptions);
-              }
+            const command = params.sdkSessionId
+              ? [
+                  codexPath,
+                  'exec',
+                  'resume',
+                  ...configFlags,
+                  ...execFlags,
+                  params.sdkSessionId,
+                  params.prompt,
+                ]
+              : [
+                  codexPath,
+                  'exec',
+                  ...configFlags,
+                  ...execFlags,
+                  params.prompt,
+                ];
 
-              let sawAnyEvent = false;
-              try {
-                const { events } = await thread.runStreamed(input);
+            proc = spawnImpl(command[0], command.slice(1), {
+              cwd: params.workingDirectory,
+              env: buildSubprocessEnv(),
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
 
-                for await (const event of events) {
-                  sawAnyEvent = true;
-                  if (params.abortController?.signal.aborted) {
-                    break;
-                  }
+            if (!proc.stdout || !proc.stderr) {
+              throw new Error('Failed to start codex subprocess stdio');
+            }
+            const stdout = proc.stdout;
+            const stderr = proc.stderr;
 
-                  switch (event.type) {
-                    case 'thread.started': {
-                      const threadId = event.thread_id as string;
-                      self.threadIds.set(params.sessionId, threadId);
+            const stdoutLines: string[] = [];
+            const stderrChunks: string[] = [];
+            let threadId = params.sdkSessionId || '';
+            let messages: string[] = [];
+            let currentAgentText = '';
+            let lastLiveText = '';
+            let sawTerminalEvent = false;
+            let emittedError = false;
 
-                      controller.enqueue(sseEvent('status', {
-                        session_id: threadId,
-                      }));
-                      break;
-                    }
+            stdout.setEncoding('utf-8');
+            stderr.setEncoding('utf-8');
 
-                    case 'item.completed': {
-                      const item = event.item as Record<string, unknown>;
-                      self.handleCompletedItem(controller, item);
-                      break;
-                    }
-
-                    case 'turn.completed': {
-                      const usage = event.usage as Record<string, unknown> | undefined;
-                      const threadId = self.threadIds.get(params.sessionId);
-
-                      controller.enqueue(sseEvent('result', {
-                        usage: usage ? {
-                          input_tokens: usage.input_tokens ?? 0,
-                          output_tokens: usage.output_tokens ?? 0,
-                          cache_read_input_tokens: usage.cached_input_tokens ?? 0,
-                        } : undefined,
-                        ...(threadId ? { session_id: threadId } : {}),
-                      }));
-                      break;
-                    }
-
-                    case 'turn.failed': {
-                      const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Turn failed'));
-                      break;
-                    }
-
-                    case 'error': {
-                      const error = (event as { message?: string }).message;
-                      controller.enqueue(sseEvent('error', error || 'Thread error'));
-                      break;
-                    }
-
-                    // item.started, item.updated, turn.started — no action needed
-                  }
-                }
-                break;
-              } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                if (savedThreadId && !retryFresh && !sawAnyEvent && shouldRetryFreshThread(message)) {
-                  console.warn('[codex-provider] Resume failed, retrying with a fresh thread:', message);
-                  savedThreadId = undefined;
-                  retryFresh = true;
+            stdout.on('data', (chunk: string) => {
+              for (const rawLine of chunk.split('\n')) {
+                const trimmed = rawLine.trim();
+                if (!trimmed) {
                   continue;
                 }
-                throw err;
-              }
-            }
+                stdoutLines.push(trimmed);
+                if (!trimmed.startsWith('{')) {
+                  continue;
+                }
 
+                try {
+                  const evt = JSON.parse(trimmed) as Record<string, unknown>;
+                  const consumed = consumeExecEvent(evt, messages, currentAgentText);
+                  messages = consumed.messages;
+                  currentAgentText = consumed.currentAgentText;
+
+                  if (consumed.threadId && !threadId) {
+                    threadId = consumed.threadId;
+                    controller.enqueue(sseEvent('status', { session_id: threadId, model: params.model }));
+                  }
+
+                  const eventType = String(evt.type || '').trim().toLowerCase();
+                  if (['turn.completed', 'response.completed', 'thread.completed'].includes(eventType)) {
+                    sawTerminalEvent = true;
+                  }
+                  if (eventType === 'turn.failed' || eventType === 'error') {
+                    const message = String(evt.message || 'Codex execution failed');
+                    controller.enqueue(sseEvent('error', message));
+                    emittedError = true;
+                  }
+
+                  const item = typeof evt.item === 'object' && evt.item ? evt.item as Record<string, unknown> : null;
+                  const itemType = String(item?.type || '').trim().toLowerCase();
+                  if (eventType === 'item.completed' && item && itemType && itemType !== 'agent_message' && itemType !== 'assistant_message') {
+                    provider.handleCompletedItem(controller, item);
+                  }
+
+                  if (consumed.changed) {
+                    const liveText = composeAgentText(messages, currentAgentText);
+                    if (liveText && liveText !== lastLiveText) {
+                      const nextChunk = liveText.startsWith(lastLiveText)
+                        ? liveText.slice(lastLiveText.length)
+                        : liveText;
+                      if (nextChunk) {
+                        controller.enqueue(sseEvent('text', nextChunk));
+                      }
+                      lastLiveText = liveText;
+                    }
+                  }
+                } catch {
+                  // Ignore malformed JSONL rows.
+                }
+              }
+            });
+
+            stderr.on('data', (chunk: string) => {
+              stderrChunks.push(chunk);
+            });
+
+            proc.on('error', (error: Error) => {
+              controller.enqueue(sseEvent('error', error.message));
+              emittedError = true;
+            });
+
+            proc.on('close', (code) => {
+              params.abortController?.signal.removeEventListener('abort', onAbort);
+
+              try {
+                if (!lastLiveText) {
+                  const parsed = parseExecJson(stdoutLines.join('\n'));
+                  if (parsed.threadId && !threadId) {
+                    threadId = parsed.threadId;
+                    controller.enqueue(sseEvent('status', { session_id: threadId, model: params.model }));
+                  }
+                  if (parsed.text) {
+                    controller.enqueue(sseEvent('text', parsed.text));
+                    lastLiveText = parsed.text;
+                  }
+                }
+
+                const stderrText = stderrChunks.join('').trim();
+                if (code !== 0 && stderrText && !emittedError) {
+                  controller.enqueue(sseEvent('error', stderrText));
+                }
+
+                controller.enqueue(sseEvent('result', {
+                  session_id: threadId || params.sdkSessionId || undefined,
+                  is_error: Boolean(code && code !== 0),
+                  completed: sawTerminalEvent || code === 0,
+                }));
+              } finally {
+                cleanup();
+                controller.close();
+              }
+            });
+          } catch (error) {
+            params.abortController?.signal.removeEventListener('abort', onAbort);
+            cleanup();
+            controller.enqueue(sseEvent('error', error instanceof Error ? error.message : String(error)));
             controller.close();
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error('[codex-provider] Error:', err instanceof Error ? err.stack || err.message : err);
-            try {
-              controller.enqueue(sseEvent('error', message));
-              controller.close();
-            } catch {
-              // Controller already closed
-            }
-          } finally {
-            // Clean up temp image files
-            for (const tmp of tempFiles) {
-              try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-            }
           }
         })();
       },
     });
   }
 
-  /**
-   * Map a completed Codex item to SSE events.
-   */
   private handleCompletedItem(
     controller: ReadableStreamDefaultController<string>,
     item: Record<string, unknown>,
@@ -314,7 +506,7 @@ export class CodexProvider implements LLMProvider {
       case 'file_change': {
         const toolId = (item.id as string) || `tool-${Date.now()}`;
         const changes = item.changes as Array<{ path: string; kind: string }> || [];
-        const summary = changes.map(c => `${c.kind}: ${c.path}`).join('\n');
+        const summary = changes.map(change => `${change.kind}: ${change.path}`).join('\n');
 
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
@@ -339,7 +531,9 @@ export class CodexProvider implements LLMProvider {
         const error = item.error as { message?: string } | undefined;
 
         const resultContent = result?.content ?? result?.structured_content;
-        const resultText = typeof resultContent === 'string' ? resultContent : (resultContent ? JSON.stringify(resultContent) : undefined);
+        const resultText = typeof resultContent === 'string'
+          ? resultContent
+          : (resultContent ? JSON.stringify(resultContent) : undefined);
 
         controller.enqueue(sseEvent('tool_use', {
           id: toolId,
@@ -350,13 +544,12 @@ export class CodexProvider implements LLMProvider {
         controller.enqueue(sseEvent('tool_result', {
           tool_use_id: toolId,
           content: error?.message || resultText || 'Done',
-          is_error: !!error,
+          is_error: Boolean(error),
         }));
         break;
       }
 
       case 'reasoning': {
-        // Reasoning is internal; emit as status
         const text = (item.text as string) || '';
         if (text) {
           controller.enqueue(sseEvent('status', { reasoning: text }));

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex IM Sync"
+  short_description: "Bridge IM chats to local Codex sessions"
+  default_prompt: "Use $codex-im-sync to set up or manage an IM bridge that resumes local Codex sessions."

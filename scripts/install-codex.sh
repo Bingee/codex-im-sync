@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install claude-to-im skill for Codex.
+# Install codex-im-sync skill for Codex.
 # Usage: bash scripts/install-codex.sh [--link]
 #   --link  Create a symlink instead of copying (for development)
 
-SKILL_NAME="claude-to-im"
+SKILL_NAME="codex-im-sync"
 CODEX_SKILLS_DIR="$HOME/.codex/skills"
 TARGET_DIR="$CODEX_SKILLS_DIR/$SKILL_NAME"
 SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,7 +44,7 @@ else
 fi
 
 # Ensure dependencies (need devDependencies for build step)
-if [ ! -d "$TARGET_DIR/node_modules" ] || [ ! -d "$TARGET_DIR/node_modules/@openai/codex-sdk" ]; then
+if [ ! -d "$TARGET_DIR/node_modules" ]; then
   echo "Installing dependencies..."
   (cd "$TARGET_DIR" && npm install)
 fi
@@ -55,12 +55,16 @@ if [ ! -f "$TARGET_DIR/dist/daemon.mjs" ]; then
   (cd "$TARGET_DIR" && npm run build)
 fi
 
-# Prune devDependencies after build
-echo "Pruning dev dependencies..."
-(cd "$TARGET_DIR" && npm prune --production)
+# Prune devDependencies after build only for copied installs.
+if [ "${1:-}" != "--link" ]; then
+  echo "Pruning dev dependencies..."
+  (cd "$TARGET_DIR" && npm prune --production)
+else
+  echo "Link mode detected; keeping dev dependencies in source checkout."
+fi
 
 echo ""
 echo "Done! Start a new Codex session and use:"
-echo "  claude-to-im setup    — configure IM platform credentials"
-echo "  claude-to-im start    — start the bridge daemon"
-echo "  claude-to-im doctor   — diagnose issues"
+echo "  codex-im-sync setup    — configure IM platform credentials"
+echo "  codex-im-sync start    — start the bridge daemon"
+echo "  codex-im-sync doctor   — diagnose issues"

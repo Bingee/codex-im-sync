@@ -1,5 +1,5 @@
 /**
- * Daemon entry point for claude-to-im-skill.
+ * Daemon entry point for codex-im-sync.
  *
  * Assembles all DI implementations and starts the bridge.
  */
@@ -9,9 +9,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import { initBridgeContext } from 'claude-to-im/src/lib/bridge/context.js';
-import * as bridgeManager from 'claude-to-im/src/lib/bridge/bridge-manager.js';
-// Side-effect import to trigger adapter self-registration
-import 'claude-to-im/src/lib/bridge/adapters/index.js';
+import * as bridgeManager from './bridge-manager.js';
 
 import type { LLMProvider } from 'claude-to-im/src/lib/bridge/host.js';
 import { loadConfig, configToSettings, CTI_HOME } from './config.js';
@@ -36,32 +34,44 @@ async function resolveProvider(config: Config, pendingPerms: PendingPermissions)
 
   if (runtime === 'codex') {
     const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    return new CodexProvider(pendingPerms, {
+      codexPath: config.codexExecutable,
+      sandboxMode: config.codexSandboxMode,
+      approvalPolicy: config.codexApprovalPolicy,
+      fullAuto: config.codexFullAuto,
+      dangerouslyBypass: config.codexDangerouslyBypass,
+    });
   }
 
   if (runtime === 'auto') {
     const cliPath = resolveClaudeCliPath();
     if (cliPath) {
-      console.log(`[claude-to-im] Auto: using Claude CLI at ${cliPath}`);
+      console.log(`[codex-im-sync] Auto: using Claude CLI at ${cliPath}`);
       return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
     }
-    console.log('[claude-to-im] Auto: Claude CLI not found, falling back to Codex');
+    console.log('[codex-im-sync] Auto: Claude CLI not found, falling back to Codex');
     const { CodexProvider } = await import('./codex-provider.js');
-    return new CodexProvider(pendingPerms);
+    return new CodexProvider(pendingPerms, {
+      codexPath: config.codexExecutable,
+      sandboxMode: config.codexSandboxMode,
+      approvalPolicy: config.codexApprovalPolicy,
+      fullAuto: config.codexFullAuto,
+      dangerouslyBypass: config.codexDangerouslyBypass,
+    });
   }
 
   // Default: claude
   const cliPath = resolveClaudeCliPath();
   if (!cliPath) {
     console.error(
-      '[claude-to-im] FATAL: Cannot find the `claude` CLI executable.\n' +
+      '[codex-im-sync] FATAL: Cannot find the `claude` CLI executable.\n' +
       '  Tried: CTI_CLAUDE_CODE_EXECUTABLE env, /usr/local/bin/claude, /opt/homebrew/bin/claude, ~/.npm-global/bin/claude, ~/.local/bin/claude\n' +
       '  Fix: Install Claude Code CLI (https://docs.anthropic.com/en/docs/claude-code) or set CTI_CLAUDE_CODE_EXECUTABLE=/path/to/claude\n' +
       '  Or: Set CTI_RUNTIME=codex to use Codex instead',
     );
     process.exit(1);
   }
-  console.log(`[claude-to-im] Using Claude CLI: ${cliPath}`);
+  console.log(`[codex-im-sync] Using Claude CLI: ${cliPath}`);
   return new SDKLLMProvider(pendingPerms, cliPath, config.autoApprove);
 }
 
@@ -90,13 +100,13 @@ async function main(): Promise<void> {
   setupLogger();
 
   const runId = crypto.randomUUID();
-  console.log(`[claude-to-im] Starting bridge (run_id: ${runId})`);
+  console.log(`[codex-im-sync] Starting bridge (run_id: ${runId})`);
 
   const settings = configToSettings(config);
   const store = new JsonFileStore(settings);
   const pendingPerms = new PendingPermissions();
   const llm = await resolveProvider(config, pendingPerms);
-  console.log(`[claude-to-im] Runtime: ${config.runtime}`);
+  console.log(`[codex-im-sync] Runtime: ${config.runtime}`);
 
   const gateway = {
     resolvePendingPermission: (id: string, resolution: { behavior: 'allow' | 'deny'; message?: string }) =>
@@ -119,11 +129,11 @@ async function main(): Promise<void> {
           startedAt: new Date().toISOString(),
           channels: config.enabledChannels,
         });
-        console.log(`[claude-to-im] Bridge started (PID: ${process.pid}, channels: ${config.enabledChannels.join(', ')})`);
+        console.log(`[codex-im-sync] Bridge started (PID: ${process.pid}, channels: ${config.enabledChannels.join(', ')})`);
       },
       onBridgeStop: () => {
         writeStatus({ running: false });
-        console.log('[claude-to-im] Bridge stopped');
+        console.log('[codex-im-sync] Bridge stopped');
       },
     },
   });
@@ -136,7 +146,7 @@ async function main(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     const reason = signal ? `signal: ${signal}` : 'shutdown requested';
-    console.log(`[claude-to-im] Shutting down (${reason})...`);
+    console.log(`[codex-im-sync] Shutting down (${reason})...`);
     pendingPerms.denyAll();
     await bridgeManager.stop();
     writeStatus({ running: false, lastExitReason: reason });
@@ -149,19 +159,19 @@ async function main(): Promise<void> {
 
   // ── Exit diagnostics ──
   process.on('unhandledRejection', (reason) => {
-    console.error('[claude-to-im] unhandledRejection:', reason instanceof Error ? reason.stack || reason.message : reason);
+    console.error('[codex-im-sync] unhandledRejection:', reason instanceof Error ? reason.stack || reason.message : reason);
     writeStatus({ running: false, lastExitReason: `unhandledRejection: ${reason instanceof Error ? reason.message : String(reason)}` });
   });
   process.on('uncaughtException', (err) => {
-    console.error('[claude-to-im] uncaughtException:', err.stack || err.message);
+    console.error('[codex-im-sync] uncaughtException:', err.stack || err.message);
     writeStatus({ running: false, lastExitReason: `uncaughtException: ${err.message}` });
     process.exit(1);
   });
   process.on('beforeExit', (code) => {
-    console.log(`[claude-to-im] beforeExit (code: ${code})`);
+    console.log(`[codex-im-sync] beforeExit (code: ${code})`);
   });
   process.on('exit', (code) => {
-    console.log(`[claude-to-im] exit (code: ${code})`);
+    console.log(`[codex-im-sync] exit (code: ${code})`);
   });
 
   // ── Heartbeat to keep event loop alive ──
@@ -171,7 +181,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('[claude-to-im] Fatal error:', err instanceof Error ? err.stack || err.message : err);
+  console.error('[codex-im-sync] Fatal error:', err instanceof Error ? err.stack || err.message : err);
   try { writeStatus({ running: false, lastExitReason: `fatal: ${err instanceof Error ? err.message : String(err)}` }); } catch { /* ignore */ }
   process.exit(1);
 });

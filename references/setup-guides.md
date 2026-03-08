@@ -156,8 +156,25 @@ Enter comma-separated IDs. Leave empty to allow all servers the bot is in.
 2. Under **"Event Dispatch Method"**, select **"Long Connection"** (长连接 / WebSocket mode)
 3. Click **"Add Event"** and add these events:
    - `im.message.receive_v1` — Receive messages
-   - `p2p_chat_create` — Bot added to chat (optional but recommended)
-4. Click **"Save"**
+   - `im.chat.access_event.bot_p2p_chat_entered_v1` — User opened bot p2p chat (required for menu routing)
+   - `application.bot.menu_v6` — Bot custom menu clicks
+4. Optional: add this callback only if you use Feishu template-card interactions:
+   - `card.action.trigger` — Interactive card button callbacks
+5. Click **"Save"**
+
+### Step C.1 — Configure bot menu items
+
+In the **Bot** feature settings, add event-type menu items with these event keys:
+
+- `cti_threads` — Show local Codex threads
+- `cti_threads_refresh` — Refresh local Codex threads
+- `cti_new_session` — Start a new bridge session
+- `cti_status` — Show current bridge status
+- `cti_use_1` — Switch to thread slot 1 from `/threads`
+- `cti_use_2` — Switch to thread slot 2 from `/threads`
+- `cti_use_3` — Switch to thread slot 3 from `/threads`
+- `cti_use_4` — Switch to thread slot 4 from `/threads`
+- `cti_use_5` — Switch to thread slot 5 from `/threads`
 
 ### Step D — Publish the app
 

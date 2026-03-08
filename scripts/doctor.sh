@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CTI_HOME="$HOME/.claude-to-im"
+CTI_HOME="$HOME/.codex-im-sync"
 CONFIG_FILE="$CTI_HOME/config.env"
 PID_FILE="$CTI_HOME/runtime/bridge.pid"
 LOG_FILE="$CTI_HOME/logs/bridge.log"
@@ -78,25 +78,13 @@ if [ "$CTI_RUNTIME" = "codex" ] || [ "$CTI_RUNTIME" = "auto" ]; then
     fi
   fi
 
-  # Check @openai/codex-sdk
-  CODEX_SDK="$SKILL_DIR/node_modules/@openai/codex-sdk"
-  if [ -d "$CODEX_SDK" ]; then
-    check "@openai/codex-sdk installed" 0
-  else
-    if [ "$CTI_RUNTIME" = "codex" ]; then
-      check "@openai/codex-sdk installed (not found — run 'npm install' in $SKILL_DIR)" 1
-    else
-      check "@openai/codex-sdk installed (not found — OK for auto/claude mode)" 0
-    fi
-  fi
-
   # Check Codex auth: any of CTI_CODEX_API_KEY / CODEX_API_KEY / OPENAI_API_KEY,
-  # or `codex auth status` showing logged-in (interactive login).
+  # or `codex login status` showing logged-in (interactive login).
   CODEX_AUTH=1
   if [ -n "${CTI_CODEX_API_KEY:-}" ] || [ -n "${CODEX_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
     CODEX_AUTH=0
   elif command -v codex &>/dev/null; then
-    CODEX_AUTH_OUT=$(codex auth status 2>&1 || true)
+    CODEX_AUTH_OUT=$(codex login status 2>&1 || true)
     if echo "$CODEX_AUTH_OUT" | grep -qiE 'logged.in|authenticated'; then
       CODEX_AUTH=0
     fi
@@ -105,7 +93,7 @@ if [ "$CTI_RUNTIME" = "codex" ] || [ "$CTI_RUNTIME" = "auto" ]; then
     check "Codex auth available (API key or login)" 0
   else
     if [ "$CTI_RUNTIME" = "codex" ]; then
-      check "Codex auth available (set OPENAI_API_KEY or run 'codex auth login')" 1
+      check "Codex auth available (set OPENAI_API_KEY or run 'codex login')" 1
     else
       check "Codex auth available (not found — needed only for Codex fallback)" 0
     fi

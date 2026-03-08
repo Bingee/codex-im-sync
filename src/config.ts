@@ -8,6 +8,11 @@ export interface Config {
   defaultWorkDir: string;
   defaultModel?: string;
   defaultMode: string;
+  codexExecutable?: string;
+  codexSandboxMode?: string;
+  codexApprovalPolicy?: string;
+  codexFullAuto?: boolean;
+  codexDangerouslyBypass?: boolean;
   // Telegram
   tgBotToken?: string;
   tgChatId?: string;
@@ -26,7 +31,7 @@ export interface Config {
   autoApprove?: boolean;
 }
 
-export const CTI_HOME = process.env.CTI_HOME || path.join(os.homedir(), ".claude-to-im");
+export const CTI_HOME = process.env.CTI_HOME || path.join(os.homedir(), ".codex-im-sync");
 export const CONFIG_PATH = path.join(CTI_HOME, "config.env");
 
 function parseEnvFile(content: string): Map<string, string> {
@@ -76,6 +81,11 @@ export function loadConfig(): Config {
     defaultWorkDir: env.get("CTI_DEFAULT_WORKDIR") || process.cwd(),
     defaultModel: env.get("CTI_DEFAULT_MODEL") || undefined,
     defaultMode: env.get("CTI_DEFAULT_MODE") || "code",
+    codexExecutable: env.get("CTI_CODEX_EXECUTABLE") || env.get("CTI_CODEX_BIN") || undefined,
+    codexSandboxMode: env.get("CTI_CODEX_SANDBOX_MODE") || undefined,
+    codexApprovalPolicy: env.get("CTI_CODEX_APPROVAL_POLICY") || undefined,
+    codexFullAuto: env.get("CTI_CODEX_FULL_AUTO") === "true",
+    codexDangerouslyBypass: env.get("CTI_CODEX_DANGEROUS_BYPASS") === "true",
     tgBotToken: env.get("CTI_TG_BOT_TOKEN") || undefined,
     tgChatId: env.get("CTI_TG_CHAT_ID") || undefined,
     tgAllowedUsers: splitCsv(env.get("CTI_TG_ALLOWED_USERS")),
@@ -108,6 +118,11 @@ export function saveConfig(config: Config): void {
   out += formatEnvLine("CTI_DEFAULT_WORKDIR", config.defaultWorkDir);
   if (config.defaultModel) out += formatEnvLine("CTI_DEFAULT_MODEL", config.defaultModel);
   out += formatEnvLine("CTI_DEFAULT_MODE", config.defaultMode);
+  out += formatEnvLine("CTI_CODEX_EXECUTABLE", config.codexExecutable);
+  out += formatEnvLine("CTI_CODEX_SANDBOX_MODE", config.codexSandboxMode);
+  out += formatEnvLine("CTI_CODEX_APPROVAL_POLICY", config.codexApprovalPolicy);
+  if (config.codexFullAuto) out += formatEnvLine("CTI_CODEX_FULL_AUTO", "true");
+  if (config.codexDangerouslyBypass) out += formatEnvLine("CTI_CODEX_DANGEROUS_BYPASS", "true");
   out += formatEnvLine("CTI_TG_BOT_TOKEN", config.tgBotToken);
   out += formatEnvLine("CTI_TG_CHAT_ID", config.tgChatId);
   out += formatEnvLine(
